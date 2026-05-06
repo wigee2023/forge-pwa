@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef, useReducer } from 'react';
-import { Text, View, StyleSheet, Pressable, DeviceEventEmitter, Animated, Platform, TextInput, SafeAreaView, PanResponder, StyleProp, TextStyle } from 'react-native';
+import { Text, View, StyleSheet, Pressable, DeviceEventEmitter, Animated, Platform, TextInput, SafeAreaView, StyleProp, TextStyle } from 'react-native';
 import { Image as ExpoImage } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -302,7 +302,7 @@ export function RuckScreen({
   const [mapZoom, setMapZoom] = useState(15);
   const [mapCenter, setMapCenter] = useState<TrackPoint | null>(null);
   const [isPanning, setIsPanning] = useState(false);
-const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, false = pan free
+  const [gpsFollowMode, setGpsFollowMode] = useState(true);
   const [compassHeading, setCompassHeading] = useState<number | null>(null);
   const [mapExpanded, setMapExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
@@ -342,13 +342,39 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
   const selectedHistoryRuck = ruckHistory.find((session) => session.id === selectedHistoryId) ?? ruckHistory[0];
 
   const currentPoint = routePoints[routePoints.length - 1];
-  const effectiveMapCenter = mapCenter ?? currentPoint;
+  const selectedCheckpoint = plannedCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? plannedCheckpoints[0] ?? null;
+  const selectedCheckpointPlaced = selectedCheckpoint?.latitude != null && selectedCheckpoint.longitude != null;
+  const selectedCheckpointPoint = selectedCheckpointPlaced ? selectedCheckpoint as RuckCheckpoint & TrackPoint : null;
+  const placedCheckpoints = useMemo(
+    () => plannedCheckpoints.filter((checkpoint): checkpoint is RuckCheckpoint & TrackPoint => (
+      checkpoint.latitude != null && checkpoint.longitude != null
+    )),
+    [plannedCheckpoints]
+  );
+  const planningMapCenter = selectedCheckpointPoint ?? placedCheckpoints[0] ?? null;
+  const effectiveMapCenter = mapCenter ?? currentPoint ?? planningMapCenter;
+  const hasMapCenter = Boolean(effectiveMapCenter);
   const currentCoordinate = currentPoint
     ? formatCoordinate(currentPoint.latitude, currentPoint.longitude, coordinateFormat)
     : null;
   const mapCenterCoordinate = effectiveMapCenter
     ? formatCoordinate(effectiveMapCenter.latitude, effectiveMapCenter.longitude, coordinateFormat)
     : null;
+  const mapOverlayLabel = isPanning
+    ? 'PANNING'
+    : gpsFollowMode && currentPoint
+      ? 'GPS GRID'
+      : currentPoint
+        ? 'MAP CENTER'
+        : 'PLAN CENTER';
+  const mapOverlayCoordinate = gpsFollowMode && currentPoint
+    ? currentCoordinate
+    : mapCenterCoordinate;
+  const panToggleLabel = gpsFollowMode
+    ? 'Free Pan'
+    : currentPoint
+      ? 'Follow GPS'
+      : 'Plan Center';
   const previousPoint = routePoints[routePoints.length - 2];
   const routeBearing = previousPoint && currentPoint ? Math.round(bearingBetween(previousPoint, currentPoint)) : null;
   const activeHeading = compassHeading ?? routeBearing;
@@ -364,12 +390,6 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
   const mapPoints = useMemo(
     () => getMercatorRoutePoints(displayRoutePoints, effectiveMapCenter, renderViewport, mapZoom),
     [displayRoutePoints, effectiveMapCenter, renderViewport, mapZoom]
-  );
-  const placedCheckpoints = useMemo(
-    () => plannedCheckpoints.filter((checkpoint): checkpoint is RuckCheckpoint & TrackPoint => (
-      checkpoint.latitude != null && checkpoint.longitude != null
-    )),
-    [plannedCheckpoints]
   );
   const checkpointMapPoints = useMemo(
     () => getMercatorRoutePoints(placedCheckpoints, effectiveMapCenter, renderViewport, mapZoom),
@@ -445,9 +465,6 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
   const checkpointStatus = checkpointIndex >= checkpointCount
     ? 'All checkpoints complete'
     : `CP ${nextCheckpointIndex}/${checkpointCount}`;
-  const selectedCheckpoint = plannedCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? plannedCheckpoints[0] ?? null;
-  const selectedCheckpointPlaced = selectedCheckpoint?.latitude != null && selectedCheckpoint.longitude != null;
-  const selectedCheckpointPoint = selectedCheckpointPlaced ? selectedCheckpoint as RuckCheckpoint & TrackPoint : null;
   const selectedCheckpointDistanceKm = currentPoint && selectedCheckpointPoint ? distanceBetween(currentPoint, selectedCheckpointPoint) : null;
   const selectedCheckpointBearing = currentPoint && selectedCheckpointPoint ? Math.round(bearingBetween(currentPoint, selectedCheckpointPoint)) : null;
   const selectedCheckpointEtaMinutes = selectedCheckpointDistanceKm == null
@@ -632,15 +649,18 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
 
   const mapGestures = useMemo(() => {
     const panGesture = Gesture.Pan()
-      .enabled(Boolean(effectiveMapCenterRef.current))
+      .enabled(true)
       .onStart(() => {
+        const startCenter = effectiveMapCenterRef.current;
+        if (!startCenter) return;
+
         if (zoomAnimFrame.current) {
           cancelAnimationFrame(zoomAnimFrame.current);
           zoomAnimFrame.current = null;
         }
         setIsPanning(true);
         setGpsFollowMode(false);
-        panStartCenter.current = effectiveMapCenterRef.current ?? null;
+        panStartCenter.current = startCenter;
       })
       .onUpdate((event) => {
         const start = panStartCenter.current;
@@ -677,8 +697,10 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
       .runOnJS(true);
 
     const pinchGesture = Gesture.Pinch()
-      .enabled(Boolean(effectiveMapCenterRef.current))
+      .enabled(true)
       .onStart(() => {
+        if (!effectiveMapCenterRef.current) return;
+
         if (zoomAnimFrame.current) {
           cancelAnimationFrame(zoomAnimFrame.current);
           zoomAnimFrame.current = null;
@@ -686,6 +708,8 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
         pinchStartZoom.current = mapZoomRef.current;
       })
       .onUpdate((event) => {
+        if (!effectiveMapCenterRef.current) return;
+
         const newZoom = Math.max(2, Math.min(18, pinchStartZoom.current + Math.log2(event.scale)));
         setMapZoom(newZoom);
       })
@@ -693,8 +717,10 @@ const [gpsFollowMode, setGpsFollowMode] = useState(true); // true = follow GPS, 
 
     const doubleTapGesture = Gesture.Tap()
       .numberOfTaps(2)
-      .enabled(Boolean(effectiveMapCenterRef.current))
+      .enabled(true)
       .onEnd(() => {
+        if (!effectiveMapCenterRef.current) return;
+
         if (zoomAnimFrame.current) cancelAnimationFrame(zoomAnimFrame.current);
         const startZoom = mapZoomRef.current;
         const endZoom = 15;
@@ -1254,7 +1280,7 @@ function addCheckpointHere() {
       showAlert('No map position', 'Start GPS tracking or wait for a location fix before adding a checkpoint here.');
       return;
     }
-    addCheckpoint(effectiveMapCenter, mapCenter ? 'manual' : 'current');
+    addCheckpoint(effectiveMapCenter, currentPoint && !mapCenter ? 'current' : 'manual');
   }
 
   function addCheckpointFromInput() {
@@ -1299,7 +1325,7 @@ function updateSelectedCheckpointHere() {
       altitude: effectiveMapCenter.altitude,
       accuracy: effectiveMapCenter.accuracy,
       timestamp: Date.now(),
-      source: mapCenter ? 'manual' : 'current',
+      source: currentPoint && !mapCenter ? 'current' : 'manual',
     });
   }
 
@@ -1433,6 +1459,22 @@ function updateSelectedCheckpointHere() {
       showAlert('No GPS fix', 'Start GPS tracking or wait for a location fix before recentring.');
       return;
     }
+    setGpsFollowMode(true);
+    setMapCenter(null);
+  }
+
+  function togglePanMode() {
+    if (!hasMapCenter) {
+      showAlert('No map position', 'Start GPS tracking or wait for a location fix before panning the map.');
+      return;
+    }
+
+    if (gpsFollowMode) {
+      setGpsFollowMode(false);
+      setMapCenter(effectiveMapCenter);
+      return;
+    }
+
     setGpsFollowMode(true);
     setMapCenter(null);
   }
@@ -1663,8 +1705,8 @@ function updateSelectedCheckpointHere() {
         {showOverlays && (
           <>
             <View style={[styles.mapGridOverlay, shadow.subtle]} pointerEvents="none">
-              <Text style={styles.mapOverlayLabel}>{gpsFollowMode ? 'GPS GRID' : 'MAP CENTER'}</Text>
-              <Text style={styles.mapOverlayValue}>{gpsFollowMode ? currentCoordinate ?? 'Awaiting fix' : mapCenterCoordinate ?? 'Awaiting fix'}</Text>
+              <Text style={styles.mapOverlayLabel}>{mapOverlayLabel}</Text>
+              <Text style={styles.mapOverlayValue}>{mapOverlayCoordinate ?? 'Awaiting fix'}</Text>
             </View>
             <View style={[styles.mapCompassOverlay, shadow.subtle]} pointerEvents="none">
               <Animated.View
@@ -1733,20 +1775,13 @@ function updateSelectedCheckpointHere() {
         {showOverlays && (
           <View style={styles.mapSelectControls}>
             <Pressable
-              style={[styles.mapSelectButton, !gpsFollowMode && styles.mapSelectButtonActive, shadow.subtle]}
-              onPress={() => {
-                if (gpsFollowMode) {
-                  setGpsFollowMode(false);
-                  setMapCenter(effectiveMapCenter);
-                } else {
-                  setGpsFollowMode(true);
-                  setMapCenter(null);
-                }
-              }}
+              style={[styles.mapSelectButton, !gpsFollowMode && styles.mapSelectButtonActive, !hasMapCenter && styles.mapSelectButtonDisabled, shadow.subtle]}
+              onPress={togglePanMode}
+              disabled={!hasMapCenter}
             >
-              <Ionicons name={!gpsFollowMode ? "locate-outline" : 'locate'} size={14} color={!gpsFollowMode ? colours.background : colours.cyan} />
+              <Ionicons name={!gpsFollowMode ? 'hand-left' : 'hand-left-outline'} size={14} color={!gpsFollowMode ? colours.background : colours.cyan} />
               <Text style={[styles.mapSelectButtonText, !gpsFollowMode && styles.mapSelectButtonTextActive]}>
-                {gpsFollowMode ? 'Pan Free' : 'GPS Follow'}
+                {panToggleLabel}
               </Text>
             </Pressable>
             <Pressable
@@ -2915,6 +2950,9 @@ const styles = StyleSheet.create({
   mapSelectButtonActive: {
     backgroundColor: colours.cyan,
     borderColor: colours.cyan,
+  },
+  mapSelectButtonDisabled: {
+    opacity: 0.48,
   },
   mapSelectButtonText: { ...typography.label, color: colours.cyan },
   mapSelectButtonTextActive: { color: colours.background },
